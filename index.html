@@ -1,0 +1,233 @@
+<!-- views/index.html -->
+<!-- Client side code that draws the map and road condition.
+The simulation data is read and called every 1 second (actual data is collected every 1 minute) -->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Realtime Road Condition Monitoring</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+    <!-- Styles used for marking road conditions on the map -->
+    <style>
+        #map {
+            height: 800px;
+        }
+
+        .red-dot {
+            background-color: red;
+            border-radius: 50%;
+        }
+
+        .gradient-bar {
+            width: 100%;
+            height: 30px;
+            background: linear-gradient(to right, orange, red);
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+
+        .gradient-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #333;
+        }
+
+        .gradient-labels span {
+            position: relative;
+            top: -10px;
+        }
+    </style>
+
+</head>
+
+<body>
+    <div id="map"></div>
+    <!-- Time stamp indicator for simulation-->
+    <div><a>Timeline: </a><a id="datetime"></a></div>
+    <!-- Tire pressure color reference -->
+    <h3>Tire pressure reference map:</h3>
+    <div class="gradient-bar"></div>
+    <div class="gradient-labels">
+        <span>125</span>
+        <span>140</span>
+        <span>155</span>
+        <span>170</span>
+        <span>185</span>
+        <span>200</span>
+        <span>215</span>
+        <span>230</span>
+        <span>245</span>
+        <span>260</span>
+    </div>
+
+    <!-- Scripts used by the client -->
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.7.5/proj4.js"></script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+
+
+    <script>
+        // Initialize Leaflet map
+        var map = L.map('map').setView([43.0453629, 106.8618258], 16);
+        var drawnPolylines = [];
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        //Fetch map data from server and add polylines to the map to draw the road
+        fetch('/map-data')
+            .then(response => response.json())
+            .then(data => {
+                data.forEach(figure => {
+                    var coordinates = figure.figure.vertexList.map(vertex => {
+
+                        coor = convertUTMToLatLon(vertex.x, vertex.y, 48, 'N');
+                        return [coor.latitude, coor.longitude];
+                    });
+                    var polyline = L.polyline(coordinates).addTo(map);
+                    drawnPolylines.push(polyline);
+                    var popupContent = `<h2>${figure.figure.xProperties.MDA_NAME}</h2>
+                                       <p>Chainage: ${figure.figure.xProperties.CHAINAGE_REF}</p>
+                                       <p>Location Code: ${figure.figure.xProperties.LOCATION_CODE}</p>`;
+                    polyline.bindPopup(popupContent);
+                });
+            })
+            .catch(error => {
+                console.error('Error fetching map data:', error);
+            });
+
+        //Converts UTM location to Lat, Lng coordinates
+        function convertUTMToLatLon(easting, northing, zoneNumber, hemisphere) {
+            const utmProjection = '+proj=utm +zone=' + zoneNumber + hemisphere + ' +ellps=WGS84 +datum=WGS84 +units=m +no_defs';
+            const wgs84Projection = '+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs';
+            const [longitude, latitude] = proj4(utmProjection, wgs84Projection, [easting, northing]);
+            return { latitude, longitude };
+        }
+
+
+        // General variables for simulation
+        let dataIndex = 0;
+        var simdata;
+        var marker = L.marker([0, 0]).addTo(map);
+        var idd = false;
+
+        //Retrieves simulation data
+        fetch('/sim-data')
+            .then(response => response.json())
+            .then(data => {
+                simdata = data;
+                device_id = data[0].device_id;
+            })
+            .catch(error => {
+                console.error('Error fetching map data:', error);
+            });
+
+        //When new data comes, updates the position of the truck
+        //and checks if the tire pressure are normal
+        function getLocation() {
+            if (dataIndex < simdata.length) {
+
+                const { dateTime, latitude, longitude, device_id } = simdata[dataIndex];
+                if (device_id && !idd) {
+                    marker.bindPopup(device_id);
+                    idd = true;
+                }
+                if (latitude && longitude) {
+
+                    updateMarker(marker, latitude, longitude, 30);
+                    $('#datetime').html(dateTime);
+                    var tireVal = getHighestTireValue(simdata[dataIndex]);
+                    if (tireVal) {
+                        addDotMarker(map, latitude, longitude, tireVal);
+                    };
+                }
+                dataIndex++;
+            } else {
+                clearInterval(intervalId);
+            }
+        }
+
+        //Simulation
+        //Retrieves the next data every 1000ms
+        const intervalId = setInterval(getLocation, 1000);
+
+        function updateMarker(marker, latitude, longitude, duration) {
+            var oldLatLng = marker.getLatLng();
+            var totalSteps = 60; // Total number of steps for smooth movement
+            var stepIndex = 0;
+            var latStep = (latitude - oldLatLng.lat) / totalSteps;
+            var lngStep = (longitude - oldLatLng.lng) / totalSteps;
+            var interval = duration / totalSteps;
+            var moveInterval = setInterval(function () {
+                if (stepIndex < totalSteps) {
+                    var newLat = oldLatLng.lat + latStep * stepIndex;
+                    var newLng = oldLatLng.lng + lngStep * stepIndex;
+                    marker.setLatLng([newLat, newLng]);
+                    stepIndex++;
+                } else {
+                    clearInterval(moveInterval);
+                    var newLatLng = [latitude, longitude];
+                    marker.setLatLng(newLatLng);
+                }
+            }, interval);
+
+            var point = L.latLng([latitude, longitude]);
+
+        }
+
+        //Adds marker to indicate a bad spot on the road map
+        function addDotMarker(map, latitude, longitude, tireVal) {
+
+            var marker = L.circleMarker([latitude, longitude], {
+                color: getColorValue(tireVal),
+                opacity: 0.1,
+                radius: 6
+            }).addTo(map);
+            marker.bindPopup("Tire Pressure: " + tireVal);
+        }
+
+        //When new data comes, checks if any of the tire pressure is abnormal,
+        //if so returns the highest abnormal value
+        function getHighestTireValue(jsonObject) {
+            var highestValue = -Infinity;
+
+            // Iterate through each key-value pair in the object
+            for (var key in jsonObject) {
+                if (key.startsWith("Tire")) {
+                    var tireValue = parseInt(jsonObject[key]);
+                    if (tireValue > 125 && tireValue > highestValue) {
+                        highestValue = tireValue;
+
+                    }
+                }
+            }
+            return highestValue === -Infinity ? null : highestValue;
+        }
+
+        //Converts tire pressure value into color (orange->red)
+        //Returns the color code
+        function getColorValue(value) {
+            // Normalize the input value to a range between 0 and 1
+            var normalizedValue = (value - 125) / (260 - 125);
+
+            // Interpolate between orange (255, 165, 0) and red (255, 0, 0) using the normalized value
+            var r = Math.round(255 * (1 - normalizedValue) + 255 * normalizedValue);
+            var g = Math.round(165 * (1 - normalizedValue));
+            var b = 0;
+
+            // Construct the CSS color string
+            var color = 'rgb(' + r + ',' + g + ',' + b + ')';
+            return color;
+        }
+
+    </script>
+
+
+
+</body>
+
+</html>
